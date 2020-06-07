@@ -1,5 +1,7 @@
 # Bank Marketing
 
-lasjdalskdj
+Descrição e resumo
 
-# 
+# Bibliotecas externas
+
+
