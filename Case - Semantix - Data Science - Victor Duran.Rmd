@@ -1,0 +1,627 @@
+---
+title: "Case"
+author: "Victor Duran"
+date: "6/7/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r libs, message=FALSE}
+library(dplyr)
+library(ggplot2)
+library(gridExtra)
+library(knitr)
+library(caret)
+library(pROC)
+```
+
+```{r loading data}
+df <- read.table(unz("bank.zip", "bank-full.csv"),
+                 header = TRUE, sep = ";", stringsAsFactors = FALSE)
+```
+
+### Análises preliminares
+
+Apenas para saber a natureza da base de dados que estamos lidando, algumas análises preliminares são importantes
+
+```{r}
+dim(df) # Número de linhas e colunas da base
+nrow(na.omit(df)) # Avaliando a presença de dados missing (NA) em alguma das colunas
+```
+
+
+### Questão 1
+
+```{r}
+
+
+
+# Função que transforma os dados numéricos em percentuais.
+to_percentage <- function(x){
+  out <- x %>% 
+    {.*100} %>% 
+    round(2) %>% 
+    paste0("%")
+  return(out)
+}
+
+df %>% 
+  # Agrupando a base por categoria de emprego
+  group_by(job) %>% 
+  # Sumarizando dados de empréstimo em três variáveis
+            # Possui hipoteca
+  summarize(housing_yes = mean(housing == "yes"),
+            # Possui empréstimo pessoal
+            personal_loan_yes = mean(loan == "yes"),
+            # Possui pelo menos um dos tipos de empréstimo
+            at_least_one_yes = mean(housing == "yes" |
+                                     loan == "yes")) %>% 
+  # Ordenando a base pela proporção de pessoas com pelo menos um empréstimo
+  arrange(desc(at_least_one_yes)) %>% 
+  # Formatando os dados para exibição em percentual
+  mutate_at(c("housing_yes", "personal_loan_yes", "at_least_one_yes"), to_percentage) %>% 
+  # Formatando output
+  kable(caption = "Tabela 1. Proporção de empréstimos por tipo de emprego.")
+```
+
+
+Interpretei o trecho: "tem mais tendência a fazer um empréstimo" como sendo "pelo menos um tipo de empréstimo". Assim, temos que os trabalhadores descritos como "blue-collar" são aqueles com maior propensão a ter feito um empréstimo, com 78,08% deles tendo pelo menos um tipo de empréstimo entre os disponíveis na base de dados. O tipo de empréstimo mais frequente é a hipoteca. 
+
+# Questão 2
+
+Dados de contagem que não possuem limite superior tendem a comportamentos curiosos, com distribições geralmente assimétricas.
+
+```{r}
+df$campaign %>% summary()
+```
+
+Uma conferência rápida usando a função `summary()` evidencia a assimetria da distribuição, uma vez que o terceiro quartil são 3 ligações, ao passo que o número máximo de ligações é o 63.
+
+A observação do histograma e boxplot confirmam que a distribuição de ligações é altamente assimétrica. 
+```{r}
+
+hist <- ggplot(df, aes(x = campaign)) + 
+  geom_histogram(bins = 30) + 
+  ggtitle("Ligações por cliente (Histograma)") + 
+    labs(x = "Número de ligações por cliente",
+         y = "Frequência")
+
+boxplot <- ggplot(df, aes(y = campaign)) + 
+  geom_boxplot() + 
+  ggtitle("Ligações por cliente (Boxplot)") + 
+    labs(y = "Número de ligações por cliente",
+         x = "") + 
+  theme(axis.text.x = element_blank())
+
+grid.arrange(hist, boxplot, ncol = 2)
+
+```
+
+Como queremos saber a relação entre o número de ligações e o sucesso da campanha corremos o risco de tirar conclusões espúrias se tratarmos as poucas observações com números altos de ligações com o mesmo peso que as observações com muitas observações (poucas ligações).
+
+Por isso, condensaremos as observações a partir de um limiar em que elas se tornam esparsas o suficiente para reduzir a segurança das inferências.
+
+Exploramos os quantis dos dados para tentar encontrar um limiar razoável.
+
+```{r}
+df$campaign %>% 
+  quantile(probs = seq(0.05, 1, .05))
+```
+
+Podemos ver que os clientes com mais do que oito ligações representam menos de 5% dos dados. Assim, optamos por truncar todos aqueles clientes *com 9 ou mais* ligações em uma só categoria. Com isso a gente perde o nível intervalar da medida, e temos que atentar para isso nas análises que seguem.
+
+```{r}
+df <- df %>% 
+  # Criando uma nova variável com os dados acumulando-os na ponta extrema superior
+    
+  mutate(campaign_trunc = ifelse(campaign < 9, campaign, "9+"))
+
+```
+
+O uso do "9+" força a variável a se tornar do tipo `character`, que sinaliza a perda do nível intervalar da medida e impede descuidos de tirar médias com essa variável, por exemplo.
+
+Agora vamos olhar para a nossa variável dependente, o sucesso da campanha, ou `y`.
+
+```{r}
+df$y %>% 
+  table() %>% 
+  prop.table()
+```
+
+A proporção de sucessos é muito menor que a de insucessos, isso é um ponto de atenção. Embora não seja uma assimetria tão crítica quanto a observada anteriormente. Vamos ter isso em mente para o futuro.
+
+Vamos ver se essa distribuição se comporta entre os diferentes números de ligações realizadas
+
+```{r}
+df_prop_sucess <- df %>% 
+  group_by(campaign_trunc) %>% 
+  summarize(success_prop = mean(y == "yes"))
+
+kable(df_prop_sucess, caption = "Tabela 2. Proporção de sucessos por quantidade de ligações para o cliente.")
+```
+
+Vemos que o número de ligações possui uma relação decrescente com a proporção de sucessos na campanha. Naturalmente que não podemos presumir uma relação de causalidade a partir desses dados, já que são apenas dados observacionais. 
+
+
+
+# Questão 3:
+
+O número máximo de ligações pode ser estimado com base na probabilidade de sucesso de um número $X$ de ligações ou mais.
+
+```{r}
+cumulative_prop_success_vec <- numeric()
+for(i in sort(unique(df$campaign))){
+  cumulative_prop_success <- mean(df$y[df$campaign >= i] == "yes")
+  cumulative_prop_success_vec <- c(cumulative_prop_success_vec,
+                                   cumulative_prop_success) 
+}
+
+ggplot(mapping = aes(x = sort(unique(df$campaign)),
+           y = cumulative_prop_success_vec)) +
+  geom_line() + 
+  geom_line(mapping = aes(y = .02))
+```
+
+A linha horizontal representa 2% de probabilidade de sucesso na ligação. 
+
+```{r}
+index_max <- which(cumulative_prop_success_vec < 0.02) %>% min()
+
+# Qual o número referente à primeira vez que a probabilidade de sucesso cruza o limiar?
+sort(unique(df$campaign))[index_max]
+
+```
+Ou seja, a partir da 18 ligação, a probabilidade de sucesso já é pequena o suficiente para ser desconsiderada. Esse pode ser o nosso número máximo.
+
+Podemos pensar em um
+
+A parte da pergunta sobre a média de ligações exige uma resposta não trivial. O objetivo é sempre maximizar a receita líquida com a adesão ao produto. Líquida aí no sentido de retirados os custos, inclusive, de aquisição de clientes. Para estimar o número médio e máximo de ligações, temos levar em conta tanto o *ticket médio do cliente*, quanto o *custo das ligações em horas trabalhadas* e a *probabilidade de sucesso de realizar mais uma ligação*. Vamos precisar aceitar alguns pressupostos para chegar a esses números.
+
+#### Ticket Médio
+
+O ticket médio seria um valor que poderíamos obter facilmente se estivéssemos em contato com o banco, mas vamos precisar estimá-lo. Como se trata de uma conta de depósito, o ticket médio está relacionado a quanto dinheiro o cliente provavelmente vai depositar nessa conta e no spread bancário médio em Portugal. Vamos assumir aqui que o spread bancário por lá é de $10\%$.
+
+Temos o dado do saldo médio em conta do cliente (`balance`), vamos assumir que todo esse valor seria direcionado ao serviço contratado, permitindo que a gente estime o ticket médio do cliente usando a seguinte função:
+
+```{r}
+gen_average_ticket <- function(balance, bank_spread = 0.10){
+  average_ticket <- balance*bank_spread
+  return(average_ticket)
+}
+```
+
+#### Custo de ligações em horas trabalhadas
+
+Para estimar o custo médio das ligações vamos usar a variável `duration` e uma estimativa do salário de quem trabalha com customer service em portugal, em $€1000$ mensais. Daí deriva a função:
+
+```{r}
+gen_call_cost <- function(call_durations, salary = 1000){
+  avg_duration <- mean(call_durations)
+  call_cost <- (avg_duration/3600)*salary
+  return(call_cost)
+}
+
+```
+
+
+Agora vamos à probabilidade. A nossa probabilidade base foi calculada na questão anterior, mas podemos melhorar a qualidade dessa estimativa usando modelagem preditiva. 
+
+O primeiro passo é criar uma base de dados contendo apenas as variáveis que são conheciadas anteriormente à decisão de continuar ligando para o cliente.
+
+Além disso, a variável `pdays` contém uma informação que não tem caráter numérico. O valor $-1$ indica que o cliente nunca fora contactado anteriormente a essa campanha. O que vamos fazer é dicotomizar a variável, seguindo o padrão de fator das outras variáveis categóricas. Vamos apenas manter a informação de se o cliente fora ("yes") ou não ("no") contactado antes dessa campanha.
+
+```{r}
+df <- read.table(unz("bank.zip", "bank-full.csv"),
+                 header = TRUE, sep = ";", stringsAsFactors = TRUE)
+
+df_model <- df %>% 
+  select(age, job, marital, education, default, balance, loan, pdays, previous, poutcome, y) %>%
+  mutate(pdays = factor(ifelse(pdays > -1, "yes", "no")))
+
+```
+
+Essas alterações (seleção de variáveis e dicotomização da variável `pdays`) podem ser feitas direto na base inteira porque não são decisões tomadas com base na informação contida nos valores das variáveis, são decisões com base em conhecimentos prévios sobre a estrutura dos dados. 
+
+O segundo passo é dividir a base em Treino, Teste e Produção. O objetivo da base de produção é apenas integrar todas as funções e demonstrar como e:
+
+```{r}
+set.seed(1)
+partition_index <- sample(c(1, 2, 3), size = nrow(df_model),
+                          prob = c(.7, .295, .005), replace = TRUE)
+train_df <- df_model[partition_index == 1,]
+test_df <- df_model[partition_index == 2,]
+prod_df <- df_model[partition_index == 3,]
+```
+
+Usando apenas a base de treino como fonte de dados, algumas checagens nas variáveis se fazem importantes.
+
+Primeiro buscamos se existem variáveis com pouca variabilidade.
+
+```{r}
+y_pos <- which(names(train_df) == "y")
+nz_var <- nearZeroVar(train_df[,-y_pos], freqCut = 15)
+names(train_df)[nz_var]
+```
+Vemos que a variável `default` é identificada por esse processo. Vamos investigar.
+
+```{r}
+train_df$default %>% table()
+train_df$default %>% table() %>% prop.table()
+```
+
+Menos de 2% da base de treino possui registros de `default`. Essa configuração pode ser perigosa por superestimar a importância das poucas observações da base que possuem "yes" na variável `default`. O número baixo aumenta as chances de criar uma relação espúria entre esse preditor e a variável dependente. Observemos um cruzamento entre elas para ter mais informações. 
+
+```{r}
+train_df$default %>% table(train_df$y) %>% prop.table(margin = 1)
+```
+
+Como a distribuição de sucessos na campanha muda substancialmente entre os clientes que possuem ou não o dado positivo de `default`, ou seja, é mais difícil que o sinal seja expúrio. Vamos optar por não remover essa variável das bases. 
+
+Procuramos também dependências lineares entre as variáveis numéricas, o que costuma criar problemas para modelos paramétricos.
+
+```{r}
+factor_vars <- which(sapply(train_df, class) == "factor")
+findLinearCombos(train_df[,-c(y_pos, factor_vars)])
+```
+
+Bom sinal!
+
+Munidos dessas informações, procedemos à definição do objeto de preprocessamento dos dados. 
+
+```{r}
+preproc_params <- preProcess(train_df, method = c("center", "scale"))
+train_df_preproc <- predict(preproc_params, train_df)
+test_df_preproc <- predict(preproc_params, test_df)
+prod_df_preproc <- predict(preproc_params, prod_df)
+
+```
+
+Esse processo é de suma importância porque evita que utilizemos os dados de teste/produção para calibrar os parâmetros de normalização das variáveis numéricas.
+
+A próxima etapa é avaliar a distribuição da nossa variável target. 
+
+```{r}
+train_df_preproc$y %>% table()
+train_df_preproc$y %>% table() %>% prop.table()
+```
+
+Notamos de pronto que há um certo desbalanceamento de classes. Nada extremamente grave, mas que precisa ser adereçado de alguma forma. 
+
+Agora ao processo de ajuste e testagem dos modelos. Escolhemos modelos que lidam bem com tipos diferentes de variáveis preditoras que que possuem estratégias para produzir uma probabilidade como output. Um modelo paramétrico: regressão logística. E dois modelos não paramétricos, computacionais, a random forests e o Extreme Gradient Boosting, que tem resultados excelentes em diversas competições de desempenho preditivo. A escolha por modelos baseados em árvores deriva da natureza dos dados. A maioria dos preditores são de natureza categórica e modelos de árvores tendem a lidar bem com esse tipo de variável. 
+
+Para os modelos computacionais vamos usar o pacote caret, que cria um framework padronizado para comparar os modelos, além de simplificar o processo de tunning dos hiperparâmetros dos modelos. 
+
+Definimos dois métodos de validação cruzada, ambos com 5 folds para a escolha dos hiperparâmetros, mas em um deles usamos o downsampling da classe minoritária, o que dificulta que o algoritmo obtenha um desempenho razoável apenas classificando todas as observações como classe majoritária ("yes"). Isso incentiva o algoritmo a encontrar padrões que podem prever a classe rara. 
+
+```{r}
+tr_control <- trainControl(method = "cv",
+                           number = 5)
+
+tr_control_down <- trainControl(method = "cv",
+                           number = 5, 
+                           sampling = "down")
+```
+
+O número de variáveis sorteadas em cada uma das árvores da random forest (`mtry`) precisa ser selecionado. Aqui nós definimos os valores que serão comparados. Uma regra de bolso no caso das florestas randômicas é usar um inteiro próximo da raiz quadrada do número de variáveis preditoras. O valor $3$ cumpre esse papel. 
+
+
+```{r}
+grid_rf <-  data.frame(mtry = c(1, 3, 5, 9))
+```
+
+Utilizamos a função wrapper `train()` que permite que recebe as configurações da nossa suite de treino e produz os parâmetros do modelo estimado, juntamente com algumas estatísticas de performance. Nela, configuramos também a métrica a ser usada na otimização, tal seja o Kappa de Cohen, que é mais adequado dado o desbalanceamento de classes, uma vez que a No Information Rate nesse caso é muito alta e a acurácia não é tão informativa.
+
+```{r}
+
+fit_rf <- train(y ~ ., data = train_df_preproc, 
+                 method = "rf", 
+                 trControl = tr_control, 
+                 verbose = FALSE,
+                 tuneGrid = grid_rf,
+                 metric = "Kappa")
+
+fit_rf_down <- train(y ~ ., data = train_df_preproc, 
+                 method = "rf", 
+                 trControl = tr_control_down, 
+                 verbose = FALSE,
+                 tuneGrid = grid_rf,
+                 metric = "Kappa")
+
+```
+
+Seguimos a mesma estrutura para o modelo de Extreme Gradient Boosting. A diferença é que esse modelo exige uma atenção maior para a tunagem dos parâmetros. Como são muitos parâmetros diferentes, a quantidade de combinações pode sair de controle rapidamente. Essa parte da modelagem merece bastante atenção. 
+
+Vamos utilizar uma estratégia _gulosa_ para otimizar os hiperparâmetros. A primeira etapa é criar um grid de tunning com os valores padrão do xgbTree para servir de baseline.
+```{r}
+
+tr_control <- trainControl(method = "cv",
+                           number = 5)
+
+#Valores padrão dos hiperparâmetros
+grid_xgbTree <-  expand.grid(nrounds = 100, 
+                        max_depth = 6,
+                        eta = .3,
+                        gamma = 0,
+                        colsample_bytree = c(.3),
+                        min_child_weight = 1,
+                        subsample = 1)
+
+
+fit_xgbTree_baseline <- train(y ~ ., data = train_df_preproc, 
+                     method = "xgbTree", 
+                     trControl = tr_control, 
+                     tuneGrid = grid_xgbTree,
+                     metric = "Kappa",
+                     verbose = FALSE)
+
+fit_xgbTree_baseline$results
+```
+
+Temos o nosso baseline!
+
+Vamos começar tentando variar a taxa de aprendizagem menor, mas para isso precisamos dar também ao algoritmo mais iterações, já que aprenderá mais lentamente. 
+
+```{r}
+
+tr_control <- trainControl(method = "cv",
+                           number = 5, 
+                           allowParallel = TRUE) # Permite que cada combinação de parâmetros seja feita em paralelo
+
+grid_xgbTree_1 <-  expand.grid(nrounds = seq(from = 50, to = 1000, by = 50), 
+                        max_depth = 6,
+                        eta = c(0.025, 0.05, .1, .3, .5),
+                        gamma = 0,
+                        colsample_bytree = c(.3),
+                        min_child_weight = 1,
+                        subsample = 1)
+
+
+fit_xgbTree_1 <- train(y ~ ., data = train_df_preproc, 
+                     method = "xgbTree", 
+                     trControl = tr_control, 
+                     tuneGrid = grid_xgbTree_1,
+                     metric = "Kappa",
+                     verbose = FALSE)
+
+plot(fit_xgbTree_1)
+```
+
+Vemos que o número de iterações cumpre o papel esperado para as taxas de aprendizado mais lentas. Com estabilização em torno de $500$ iterações. O desempenho das diferentes taxas de aprendizado não possui muita variabilidade entre eles. Vamos optar por uma taxa de aprendizagem intermediária, de $0.05$, e vamos deixar as iterações subirem até $600$.
+
+Agora vamos variar o número máximo de níveis das árvores (`max_depth`) bem como o número de colunas amostradas para a construção de cada árvore. 
+
+```{r}
+
+tr_control <- trainControl(method = "cv",
+                           number = 5, 
+                           allowParallel = TRUE) # Permite que cada combinação de parâmetros seja feita em paralelo
+
+grid_xgbTree_2 <-  expand.grid(nrounds = seq(from = 50, to = 600, by = 50), 
+                        max_depth = 2:7,
+                        eta = c(0.05),
+                        gamma = 0,
+                        colsample_bytree = c(.1, .3, .5),
+                        min_child_weight = 1,
+                        subsample = 1)
+
+
+fit_xgbTree_2 <- train(y ~ ., data = train_df_preproc, 
+                     method = "xgbTree", 
+                     trControl = tr_control, 
+                     tuneGrid = grid_xgbTree_2,
+                     metric = "Kappa",
+                     verbose = FALSE)
+
+plot(fit_xgbTree_2)
+fit_xgbTree_2$bestTune
+```
+
+Conforme o desempenho das amostras de validação cruzada, selecionamos a proporção de .5 na amostra das colunas, e o número máximo de divisões da árvore em 3. 
+
+A última etapa de tunning vai ser em torno do `min_child_weight` que diz respeito ao peso combinado mínimo em um nodo filho para ele ser levado em conta. Ou seja, previne que inferências sejam feitas em torno de apenas 
+
+```{r}
+tr_control <- trainControl(method = "cv",
+                           number = 5, 
+                           allowParallel = TRUE) # Permite que cada combinação de parâmetros seja feita em paralelo
+
+grid_xgbTree_final <-  expand.grid(nrounds = seq(from = 50, to = 600, by = 50), 
+                                   max_depth = 3,
+                                   eta = c(0.05),
+                                   gamma = 0,
+                                   colsample_bytree = c(.5),
+                                   min_child_weight = 1:6,
+                                   subsample = 1)
+
+
+fit_xgbTree_final <- train(y ~ ., data = train_df_preproc, 
+                           method = "xgbTree", 
+                           trControl = tr_control, 
+                           tuneGrid = grid_xgbTree_final,
+                           metric = "Kappa",
+                           verbose = FALSE)
+
+plot(fit_xgbTree_final)
+```
+
+Novamente, pouca diferenciação, e esse é o nosso modelo final.
+
+```{r}
+fit_xgbTree_final$bestTune
+```
+
+Esse processo poderia continuar mais a fundo, mas temos que tomar cuidado também para não testar combinações de parâmetros o suficiente para aumentar substancialmente a probabilidade de encontrar uma combinação com bons resultados ao acaso.
+
+Procedamos ao encaixe do último modelo: a regressão logística.
+
+```{r}
+fit_logistic <- glm(y~., data = train_df_preproc,
+    family = binomial(link = "logit"))
+fit_logistic_step <- step(fit_logistic, direction = "backward")
+```
+
+O último passo para a comparação dos modelos consiste em encontrar o limiar que maximiza a soma dos quadrados da especificidade e da sensitividade. Para isso, vamos usar a curva ROC.
+
+```{r}
+
+find_best_thresh <- function(roc_obj){
+  index_max <- which.max((roc_obj$sensitivities)^2 + (roc_obj$specificities)^2)
+  return(roc_obj$thresh[index_max])
+}
+
+train_preds_rf <- predict(fit_rf, newdata = train_df_preproc, type = "prob")
+train_preds_rf_down <- predict(fit_rf_down, newdata = train_df_preproc, type = "prob")
+train_preds_xgboost <- predict(fit_xgbTree_final, newdata = train_df_preproc, type = "prob")
+train_preds_logistic <- predict(fit_logistic, newdata = train_df_preproc, type = "response")
+train_preds_logistic_step <- predict(fit_logistic_step, newdata = train_df_preproc, type = "response")
+
+roc_rf <- roc(train_df_preproc$y, train_preds_rf$yes)
+thresh_rf <- find_best_thresh(roc_rf)
+roc_rf_down <- roc(train_df_preproc$y, train_preds_rf_down$yes)
+thresh_rf_down <- find_best_thresh(roc_rf_down)
+roc_xgboost <- roc(train_df_preproc$y, train_preds_xgboost$yes)
+thresh_xgboost <- find_best_thresh(roc_xgboost)
+roc_logistic <- roc(train_df_preproc$y, train_preds_logistic)
+thresh_logistic <- find_best_thresh(roc_logistic)
+roc_logistic_step <- roc(train_df_preproc$y, train_preds_logistic_step)
+thresh_logistic_step <- find_best_thresh(roc_logistic_step)
+
+```
+
+
+E agora à análise de desempenho com a base de testes:
+
+```{r}
+
+predict_rf <- predict(fit_rf, newdata = test_df_preproc, type = "prob") %>% 
+  pull(yes) %>% 
+  {ifelse(.>thresh_rf, "yes", "no")} %>% 
+  factor()
+predict_rf_down <- predict(fit_rf_down, newdata = test_df_preproc, type = "prob") %>% 
+  pull(yes) %>% 
+  {ifelse(.>thresh_rf_down, "yes", "no")} %>% 
+  factor()
+predict_xgboost <- predict(fit_xgbTree_final, newdata = test_df_preproc, type = "prob") %>% 
+  pull(yes) %>% 
+  {ifelse(.>thresh_xgboost, "yes", "no")} %>% 
+  factor()
+
+predict_logistic <- predict(fit_logistic, newdata = test_df_preproc, type = "response") %>% 
+  {ifelse(.>thresh_logistic, "yes", "no")} %>% 
+  factor()
+
+predict_logistic_step <- predict(fit_logistic_step, newdata = test_df_preproc) %>% 
+  {ifelse(.>thresh_logistic_step, "yes", "no")} %>% 
+  factor()
+
+confusion_rf <- confusionMatrix(test_df_preproc$y, predict_rf, positive = "yes")
+confusion_rf_down <- confusionMatrix(test_df_preproc$y, predict_rf_down, positive = "yes")
+confusion_xgboost <- confusionMatrix(test_df_preproc$y, predict_xgboost, positive = "yes")
+confusion_logistic <- confusionMatrix(test_df_preproc$y, predict_logistic, positive = "yes")
+confusion_logistic_step <- confusionMatrix(test_df_preproc$y, predict_logistic_step, positive = "yes")
+
+extract_cm_info <- function(cm_data){
+  out <- c(cm_data$overall[c("Accuracy", "Kappa")],
+      cm_data$byClass[c("Sensitivity", "Specificity", "Pos Pred Value", "Neg Pred Value", "F1")])
+  return(out)
+}
+
+performance_comparison <- data.frame(model = c("RF", "RF - Downsample", "XGBoost", "Logistic", "Logistic Step"),
+                                     rbind(extract_cm_info(confusion_rf),
+                                           extract_cm_info(confusion_rf_down),
+                                           extract_cm_info(confusion_xgboost),
+                                           extract_cm_info(confusion_logistic),
+                                           extract_cm_info(confusion_logistic_step)), 
+                                     stringsAsFactors = FALSE)
+      
+```
+
+```{r}
+kable(performance_comparison, caption = "Tabela 3. Comparação de desempenho entre diferentes modelos preditivos")
+
+```
+
+Com exceção das florestas randômicas sem downsample, os modelos têm boa performance em termos de acurácia, embora ela ainda esteja muito próxima da taxa de não informação. Como no nosso caso é muito importante saber encontrar os casos positivos (Sensitividade), com uma certa tolerância a falsos positivos (1-Positive Predictive Value), já que o custo de uma ligação a mais é baixo), selecionamos o modelo de Regressão Logística, que tem o melhor desempenho nesses quesitos.
+
+```{r}
+calc_prob_success <- function(fit_model, x_vec, fit_thresh){
+  prob_success <- predict(fit_model, newdata = x_vec, type = "response")
+}
+```
+
+Unindo todas essas informações, criamos a função de decisão, que vai levar em conta o custo, receita do cliente e a probabilidade de sucesso da próxima ligação. Limitado ao nosso valor máximo calculado no início da questão.
+
+
+```{r}
+
+calc_n_calls <- function(balance, call_durations, fit_model, x_vec){
+  average_ticket <- gen_average_ticket(balance)
+  call_cost <- gen_call_cost(call_durations)
+  prob_success <- calc_prob_success(fit_model, x_vec)
+  n_calls <- (average_ticket*prob_success)/call_cost
+  out <- min(ceiling(n_calls), 18) # O nosso número máximo do começo da questão
+  return(ceiling(n_calls))
+}
+
+calc_n_calls(balance = prod_df$balance[127], 
+             call_durations = df$duration, 
+             fit_model = fit_logistic, 
+             x_vec = prod_df_preproc[127,])
+
+```
+
+No caso desse cliente em específico, dados os pressupostos acima, faria sentido ligar até 3 vezes para ele. 
+
+# Questão 4
+
+```{r}
+df$poutcome %>% table()
+df$poutcome %>% table(df$y) %>% prop.table(margin = 1)
+
+df$poutcome %>% table(df$y) %>% chisq.test()
+```
+
+A pergunta se uma variável tem relação com outra pode ser respondida com o teste de associação. Conhecido como teste de Qui-quadrado. Como vemos acima o resultado é significativo, as variáveis estão associadas. Particularmente, o sucesso em campanhas anteriores parece aumentar drasticamente a probabilidade de sucesso na campanha atual. 
+
+# Questão 5
+
+Não encontrei nos dados referência alguma sobre a questão de um seguro de crédito, mas imagino que a variável determinante seria a clientes com a presença de histórico de default.
+
+# Questão 6
+
+```{r, eval = FALSE}
+df <- read.table(unz("bank.zip", "bank-full.csv"),
+                 header = TRUE, sep = ";", stringsAsFactors = TRUE)
+
+df %>% 
+  group_by(housing) %>% 
+  summarize(
+    mean_age = mean(age),
+    median_age = median(age),
+    job = names(sort(table(job), decreasing = TRUE)[1]),
+    marital_status = names(sort(table(marital), decreasing = TRUE)[1]),
+    education = names(sort(table(education), decreasing = TRUE)[1]),
+    default = names(sort(table(default), decreasing = TRUE)[1]),
+    mean_balance = mean(balance),
+    loan = names(sort(table(loan), decreasing = TRUE)[1]),
+    contact = names(sort(table(contact), decreasing = TRUE)[1]),
+    day = names(sort(table(day), decreasing = TRUE)[1]),
+    month = names(sort(table(month), decreasing = TRUE)[1]),
+    duration = mean(duration),
+    campaign = mean(campaign),
+    pdays = mean(pdays),
+    previous_mean = mean(previous),
+    previous_median = median(previous),
+    poutcome = names(sort(table(poutcome), decreasing = TRUE)[2]),
+    y = names(sort(table(y), decreasing = TRUE)[1])) %>% t() 
+
+# %>% kable()
+          
+```
+
+O grupo daqueles que têm empréstimo imobiliário é bem parecido com o grupo que não tem. Algumas diferenças pontuais no mês mais frequente de comunicação, no número de contatos por telefone até a última campanha e uma diferença substancial na média de dinheiro em caixa.
+
