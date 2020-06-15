@@ -617,9 +617,8 @@ df %>%
     previous_mean = mean(previous),
     previous_median = median(previous),
     poutcome = names(sort(table(poutcome), decreasing = TRUE)[2]),
-    y = names(sort(table(y), decreasing = TRUE)[1])) %>% t() 
-
-# %>% kable()
+    y = names(sort(table(y), decreasing = TRUE)[1])) %>% t() %>% 
+  kable()
           
 ```
 
