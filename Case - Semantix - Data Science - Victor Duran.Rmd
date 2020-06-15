@@ -617,7 +617,7 @@ df %>%
     previous_median = median(previous),
     poutcome = names(sort(table(poutcome), decreasing = TRUE)[2]),
     y = names(sort(table(y), decreasing = TRUE)[1])) %>% t() %>% 
-  kable(caption = "Table 4. Principais características de quem possui empréstimo imobiliário")
+  kable(caption = "Tabela 4. Principais características de quem possui empréstimo imobiliário")
           
 ```
 
