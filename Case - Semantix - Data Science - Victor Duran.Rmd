@@ -1,7 +1,6 @@
 ---
-title: "Case"
+title: "Case - Bank Marketing"
 author: "Victor Duran"
-date: "6/7/2020"
 output: html_document
 ---
 
@@ -593,7 +592,7 @@ Não encontrei nos dados referência alguma sobre a questão de um seguro de cr�
 
 # Questão 6
 
-```{r, eval = FALSE}
+```{r, eval = TRUE}
 df <- read.table(unz("bank.zip", "bank-full.csv"),
                  header = TRUE, sep = ";", stringsAsFactors = TRUE)
 
@@ -618,7 +617,7 @@ df %>%
     previous_median = median(previous),
     poutcome = names(sort(table(poutcome), decreasing = TRUE)[2]),
     y = names(sort(table(y), decreasing = TRUE)[1])) %>% t() %>% 
-  kable()
+  kable(caption = "Table 4. Principais características de quem possui empréstimo imobiliário")
           
 ```
 
